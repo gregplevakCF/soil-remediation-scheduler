@@ -497,6 +497,11 @@ def detect_idle_capacity_days(schedule, params, phases_df):
 def main():
     st.set_page_config(page_title="Soil Remediation Scheduler", layout="wide")
     
+    # Display company logo
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.image("Clean_Futures_2.png", use_container_width=True)
+    
     st.title("🏗️ Soil Remediation Scheduler")
     st.markdown("**Interactive multi-phase soil remediation simulator with capacity pooling**")
     
@@ -517,16 +522,16 @@ def main():
     phase_data = {
         'Phase': ['Load', 'Rip', 'Treat', 'Dry', 'Unload'],
         'Duration_Days': [0, 1, 3, 5, 0],
-        'Saturday': ['yes', 'yes', 'yes', 'yes', 'yes'],
-        'Sunday': ['yes', 'yes', 'yes', 'yes', 'yes']
+        'Saturday': ['no', 'yes', 'yes', 'yes', 'no'],
+        'Sunday': ['no', 'yes', 'yes', 'yes', 'no']
     }
     
     phases_df = pd.DataFrame(phase_data)
     
     # Editable phase settings
     st.sidebar.markdown("**Load Phase**")
-    load_sat = st.sidebar.checkbox("Load on Saturday", value=True, key='load_sat')
-    load_sun = st.sidebar.checkbox("Load on Sunday", value=True, key='load_sun')
+    load_sat = st.sidebar.checkbox("Load on Saturday", value=False, key='load_sat')
+    load_sun = st.sidebar.checkbox("Load on Sunday", value=False, key='load_sun')
     
     st.sidebar.markdown("**Rip Phase**")
     rip_duration = st.sidebar.number_input("Rip Duration (days)", min_value=0, max_value=30, value=1)
@@ -544,8 +549,8 @@ def main():
     dry_sun = st.sidebar.checkbox("Dry on Sunday", value=True, key='dry_sun')
     
     st.sidebar.markdown("**Unload Phase**")
-    unload_sat = st.sidebar.checkbox("Unload on Saturday", value=True, key='unload_sat')
-    unload_sun = st.sidebar.checkbox("Unload on Sunday", value=True, key='unload_sun')
+    unload_sat = st.sidebar.checkbox("Unload on Saturday", value=False, key='unload_sat')
+    unload_sun = st.sidebar.checkbox("Unload on Sunday", value=False, key='unload_sun')
     
     # Update phases_df with user inputs
     phases_df.loc[phases_df['Phase'] == 'Load', 'Saturday'] = 'yes' if load_sat else 'no'
