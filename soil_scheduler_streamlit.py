@@ -9,6 +9,9 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
+from openpyxl.styles import PatternFill, Border, Side, Alignment, Font
+from openpyxl.utils import get_column_letter
+import math
 
 # ============================================================================
 # Helper Functions
@@ -72,8 +75,6 @@ class CellFlip:
 
 def simulate_remediation(params, phases_df):
     """Run the soil remediation simulation with capacity pooling"""
-    
-    import math
     
     total_flips = math.ceil(params['TotalSoil_CY'] / params['CellSize_CY'])
     num_cells = int(params['NumCells'])
@@ -607,7 +608,6 @@ def main():
         
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         
-        import math
         total_flips = math.ceil(params['TotalSoil_CY'] / params['CellSize_CY'])
         idle_days_count = st.session_state.get('idle_days_count', 0)
         
@@ -703,11 +703,86 @@ def main():
         with tab4:
             st.subheader("Export Data")
             
-            # Create Excel file in memory
+            # Rebuild full unfiltered schedule to detect idle days for highlighting
+            num_days = 1000
+            dates = [params['StartDate'] + timedelta(days=i) for i in range(num_days)]
+            months = [(i // 28) + 1 for i in range(num_days)]
+            weeks = [(i // 7) + 1 for i in range(num_days)]
+            num_cells_int = int(params['NumCells'])
+            
+            full_schedule_data = {
+                'Month': months,
+                'Week': weeks,
+                'Day Count': range(1, num_days + 1),
+                'Date': dates,
+                'DayName': [d.strftime('%A') for d in dates],
+                'SoilIn': [0] * num_days,
+                'SoilOut': [0] * num_days
+            }
+            
+            for i in range(1, num_cells_int + 1):
+                full_schedule_data[f'Cell{i}Phase'] = [''] * num_days
+            
+            full_schedule = pd.DataFrame(full_schedule_data)
+            
+            # Merge activities
+            for activity in activities:
+                matching_rows = full_schedule['Date'] == activity['Date']
+                cell_col = f"Cell{activity['CellNum']}Phase"
+                existing_phase = full_schedule.loc[matching_rows, cell_col].values[0] if len(full_schedule.loc[matching_rows]) > 0 else ''
+                if existing_phase and existing_phase != '':
+                    new_phase = existing_phase + ' + ' + activity['Phase']
+                else:
+                    new_phase = activity['Phase']
+                full_schedule.loc[matching_rows, cell_col] = new_phase
+                full_schedule.loc[matching_rows, 'SoilIn'] += activity['SoilIn']
+                full_schedule.loc[matching_rows, 'SoilOut'] += activity['SoilOut']
+            
+            full_schedule['CumSoilIn'] = full_schedule['SoilIn'].cumsum()
+            full_schedule['CumSoilOut'] = full_schedule['SoilOut'].cumsum()
+            
+            # Detect idle days on full schedule
+            idle_day_indices = []
+            phases_df_local = st.session_state.phases_df
+            for idx, row in full_schedule.iterrows():
+                is_valid_load_day = is_valid_day(row['Date'], 'Load', phases_df_local)
+                is_valid_unload_day = is_valid_day(row['Date'], 'Unload', phases_df_local)
+                no_loading = row['SoilIn'] == 0
+                no_unloading = row['SoilOut'] == 0
+                still_soil_to_load = row['CumSoilIn'] < params['TotalSoil_CY']
+                still_soil_to_unload = row['CumSoilOut'] < params['TotalSoil_CY']
+                loading_has_started = row['CumSoilIn'] > 0
+                could_have_worked = is_valid_load_day or is_valid_unload_day
+                did_nothing = no_loading and no_unloading
+                work_remains = (still_soil_to_load or (still_soil_to_unload and loading_has_started))
+                if could_have_worked and did_nothing and work_remains:
+                    idle_day_indices.append(idx)
+            
+            # Filter to match displayed schedule
+            last_day_idx = None
+            for idx, row in full_schedule.iterrows():
+                if row['CumSoilOut'] >= params['TotalSoil_CY']:
+                    last_day_idx = idx
+                    break
+            
+            if last_day_idx is not None:
+                schedule_for_export = full_schedule.iloc[:last_day_idx + 6].copy()
+            else:
+                schedule_for_export = full_schedule[
+                    (full_schedule['SoilIn'] > 0) | 
+                    (full_schedule['SoilOut'] > 0) | 
+                    (full_schedule['CumSoilIn'] > 0) | 
+                    (full_schedule['CumSoilOut'] > 0)
+                ].copy()
+            
+            # Filter idle days to exported schedule
+            filtered_idle_days = [idx for idx in idle_day_indices if idx in schedule_for_export.index]
+            
+            # Create Excel file with formatting
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                schedule.to_excel(writer, sheet_name='Schedule', index=False)
-                activities_df.to_excel(writer, sheet_name='Activities', index=False)
+                schedule_for_export.to_excel(writer, sheet_name='Schedule', index=False)
+                activities_df.to_excel(writer, sheet_name='Cell_Activities', index=False)
                 
                 # Summary sheet
                 summary_data = {
@@ -721,6 +796,7 @@ def main():
                         'Start Date',
                         'Completion Date',
                         'Total Days',
+                        'Final CumSoilOut (CY)',
                         'Idle Capacity Days'
                     ],
                     'Value': [
@@ -733,11 +809,100 @@ def main():
                         params['StartDate'].strftime('%Y-%m-%d'),
                         completion_date.strftime('%Y-%m-%d') if completion_date else 'N/A',
                         total_days,
-                        idle_days_count
+                        schedule_for_export['CumSoilOut'].max(),
+                        len(filtered_idle_days)
                     ]
                 }
                 summary_df = pd.DataFrame(summary_data)
                 summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Apply formatting to Schedule sheet
+                workbook = writer.book
+                worksheet = writer.sheets['Schedule']
+                
+                # Define colors
+                phase_colors = {
+                    'Load': '#8ED973',
+                    'Rip': '#83CCEB',
+                    'Treat': '#FFC000',
+                    'Dry': '#F2CEEF',
+                    'Unload': '#00B0F0'
+                }
+                
+                sunday_fill = PatternFill(start_color='FFFFFF00', end_color='FFFFFF00', fill_type='solid')
+                idle_fill = PatternFill(start_color='FFFF0000', end_color='FFFF0000', fill_type='solid')
+                
+                thin_border = Border(
+                    left=Side(style='thin', color='000000'),
+                    right=Side(style='thin', color='000000'),
+                    top=Side(style='thin', color='000000'),
+                    bottom=Side(style='thin', color='000000')
+                )
+                aptos_font = Font(name='Aptos Narrow', size=10)
+                aptos_font_bold = Font(name='Aptos Narrow', size=10, bold=True)
+                center_aligned = Alignment(horizontal='center', vertical='center')
+                
+                # Find columns
+                cell_columns = []
+                date_column_idx = None
+                dayname_column_idx = None
+                last_data_column_idx = len(schedule_for_export.columns)
+                
+                for col_idx, col_name in enumerate(schedule_for_export.columns, start=1):
+                    if 'Phase' in col_name:
+                        cell_columns.append((col_idx, col_name))
+                    if col_name == 'Date':
+                        date_column_idx = col_idx
+                    if col_name == 'DayName':
+                        dayname_column_idx = col_idx
+                
+                # Apply formatting
+                for row_idx in range(1, len(schedule_for_export) + 2):
+                    is_sunday = False
+                    is_idle_day = False
+                    
+                    if row_idx > 1:
+                        df_row_idx = schedule_for_export.index[row_idx - 2]
+                        is_idle_day = df_row_idx in filtered_idle_days
+                        
+                        if dayname_column_idx:
+                            day_name_cell = worksheet.cell(row=row_idx, column=dayname_column_idx)
+                            is_sunday = str(day_name_cell.value) == 'Sunday'
+                    
+                    for col_idx in range(1, last_data_column_idx + 1):
+                        cell = worksheet.cell(row=row_idx, column=col_idx)
+                        is_phase_column = any(col_idx == phase_col_idx for phase_col_idx, _ in cell_columns)
+                        
+                        cell.border = thin_border
+                        cell.font = aptos_font_bold if row_idx == 1 else aptos_font
+                        
+                        if col_idx == date_column_idx and row_idx > 1:
+                            cell.number_format = 'M/D/YYYY'
+                            if is_idle_day:
+                                cell.fill = idle_fill
+                        
+                        if is_sunday and not is_phase_column and row_idx > 1 and col_idx != date_column_idx:
+                            cell.fill = sunday_fill
+                        
+                        if row_idx > 1:
+                            for phase_col_idx, phase_col_name in cell_columns:
+                                if col_idx == phase_col_idx:
+                                    cell.alignment = center_aligned
+                                    phase_value = str(cell.value) if cell.value else ''
+                                    
+                                    for phase_name, color in phase_colors.items():
+                                        if phase_name in phase_value:
+                                            hex_color = color.lstrip('#')
+                                            openpyxl_color = 'FF' + hex_color
+                                            cell.fill = PatternFill(start_color=openpyxl_color,
+                                                                  end_color=openpyxl_color,
+                                                                  fill_type='solid')
+                                            break
+                
+                # Auto-adjust column widths
+                for column_cells in worksheet.columns:
+                    length = max(len(str(cell.value) if cell.value else "") for cell in column_cells)
+                    worksheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(length + 2, 50)
             
             output.seek(0)
             
